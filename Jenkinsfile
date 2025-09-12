@@ -2,93 +2,86 @@ pipeline {
     agent any
 
     tools {
-        maven 'Maven'
+        maven 'Maven' // Specify the Maven tool configured in Jenkins
     }
 
     environment {
         DOCKER_IMAGE = 'my-springboot-app'
-        EC2_PUBLIC_IP = 'YOUR_EC2_PUBLIC_IP'  // Replace with your EC2 public IP
+        REPO_URL = 'https://github.com/gq80132/MySpringBootApp.git'
+        EC2_HOST = '18.191.161.237'
+        EC2_USER = 'ec2-user'
+        SSH_KEY_PATH = '/Users/gq/CS/Phase4Project/myKeyPair.pem'
+        // Add Docker path if needed
+        PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
     }
 
     stages {
         stage('Checkout') {
             steps {
-                echo 'Getting source code from SCM...'
-                checkout scm
+                echo 'Getting source code...'
+                git branch: 'main', url: env.REPO_URL
             }
         }
 
-        stage('Build Application') {
+        stage('Build Locally') {
             steps {
-                echo 'Building Spring Boot application...'
+                echo 'Building Spring Boot app locally...'
                 sh '''
-                    # Clean and build with Maven
-                    mvn clean package -DskipTests
-
-                    # Verify JAR file was created
+                    # Build with Maven using the configured Maven tool
+                    mvn clean package -DskipTests -q
                     ls -la target/*.jar
-                    echo "✅ JAR file built successfully"
-                '''
-            }
-        }
 
-        stage('Build Docker Image') {
-            steps {
-                echo 'Building Docker image...'
-                sh '''
-                    # Build Docker image with the newly built JAR
+                    # Check if Docker is available
+                    which docker || echo "Docker not found in PATH: $PATH"
+
+                    # Build Docker image locally
                     docker build -t ${DOCKER_IMAGE}:latest .
-
-                    # List Docker images to verify
-                    docker images | grep ${DOCKER_IMAGE}
-                    echo "✅ Docker image built successfully"
+                    echo "✅ Docker image built locally: ${DOCKER_IMAGE}:latest"
                 '''
             }
         }
 
-        stage('Deploy Container') {
+        stage('Deploy to EC2') {
             steps {
-                echo 'Deploying Docker container...'
+                echo 'Deploying to EC2 instance...'
                 sh '''
-                    # Stop and remove existing container (if any)
-                    docker stop my-springboot-app || true
-                    docker rm my-springboot-app || true
+                    # Save Docker image as tar file for transfer
+                    docker save ${DOCKER_IMAGE}:latest | gzip > ${DOCKER_IMAGE}.tar.gz
+                    echo "✅ Docker image saved as tar.gz"
 
-                    # Run new container
-                    docker run -d --name my-springboot-app -p 9090:9090 ${DOCKER_IMAGE}:latest
+                    # Transfer image to EC2
+                    scp -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${DOCKER_IMAGE}.tar.gz ${EC2_USER}@${EC2_HOST}:~/
+                    echo "✅ Image transferred to EC2"
 
-                    # Wait for container to start
-                    sleep 10
+                    # Deploy on EC2 via SSH
+                    ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << 'EOF'
+                        # Load the Docker image
+                        docker load < ~/${DOCKER_IMAGE}.tar.gz
 
-                    # Verify deployment
-                    if docker ps | grep my-springboot-app; then
-                        echo "✅ Container deployed successfully"
-                        echo "🌐 App accessible at: http://${EC2_PUBLIC_IP}:9090/news/headline"
+                        # Stop and remove existing container
+                        docker stop my-springboot-app || true
+                        docker rm my-springboot-app || true
 
-                        # Test the endpoint
-                        echo "Testing application endpoint..."
-                        curl -f http://localhost:9090/news/headline || echo "⚠️ Application might still be starting up"
-                    else
-                        echo "❌ Deployment failed"
-                        docker logs my-springboot-app
-                        exit 1
-                    fi
-                '''
-            }
-        }
+                        # Run new container
+                        docker run -d --name my-springboot-app -p 9090:9090 ${DOCKER_IMAGE}:latest
 
-        stage('Cleanup') {
-            steps {
-                echo 'Cleaning up old Docker images...'
-                sh '''
-                    # Remove old/unused Docker images to save space
-                    docker image prune -f
+                        # Clean up tar file
+                        rm ~/${DOCKER_IMAGE}.tar.gz
 
-                    # Show current Docker resource usage
-                    echo "Current Docker images:"
-                    docker images
-                    echo "Running containers:"
-                    docker ps
+                        # Verify deployment
+                        sleep 5
+                        if docker ps | grep my-springboot-app; then
+                            echo "✅ Container deployed successfully on EC2"
+                            echo "🌐 App accessible at: http://${EC2_HOST}:9090/news/headline"
+                        else
+                            echo "❌ Deployment failed"
+                            docker logs my-springboot-app
+                        fi
+                    EOF
+
+                    # Clean up local tar file
+                    rm ${DOCKER_IMAGE}.tar.gz
+                    echo "✅ Local cleanup completed"
                 '''
             }
         }
@@ -96,16 +89,13 @@ pipeline {
 
     post {
         always {
-            echo 'Pipeline completed!'
+            echo "Pipeline completed. Check EC2 instance for deployment status."
         }
         success {
-            echo '🎉 Build and deployment successful!'
-            echo "Your Spring Boot app is running at: http://${EC2_PUBLIC_IP}:9090/news/headline"
+            echo "🎉 Deployment successful! Your app is running on EC2."
         }
         failure {
-            echo '❌ Build or deployment failed'
-            echo 'Check the logs above for error details'
-            sh 'docker logs my-springboot-app || echo "Container not running"'
+            echo "❌ Deployment failed. Check the logs above for errors."
         }
     }
 }

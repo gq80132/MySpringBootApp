@@ -12,6 +12,6 @@ public class NewsController {
     @GetMapping("/headline")
     @ResponseBody
     public String getLatestBusinessNewsHeadline() {
-        return "Breaking News: Success Deploying Spring Boot Application!";
+        return "Breaking News: Success Deploying My Spring Boot Application!";
     }
 }
